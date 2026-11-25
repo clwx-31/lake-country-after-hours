@@ -1,0 +1,31 @@
+{
+  "name": "lake-country-after-hours",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Arcade 3D driving game on the real roads and terrain of Hartland and Chenequa, Wisconsin (OpenStreetMap + USGS 3DEP).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "serve:dist": "node scripts/serve-dist.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "playtest": "node scripts/playtest.mjs",
+    "map:fetch": "node scripts/fetch-lakecountry.mjs",
+    "map:convert": "node scripts/convert-lakecountry.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/three": "0.187.0",
+    "playwright": "1.65.1",
+    "pngjs": "^7.0.0",
+    "typescript": "5.9.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  },
+  "dependencies": {
+    "@fontsource/barlow-condensed": "^5.3.0",
+    "three": "0.187.0"
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+playtest-output/
+*.log
+# Downloaded source data; rebuild with `npm run map:fetch`. Keep the meta file.
+data/raw-lake/*.osm.json
+data/raw-lake/terrain/
+data/raw-holyhill/*.osm.json
+data/raw-holyhill/terrain/
+# Personal notes and one-off dev scratch files
+Waukesha_After_Hours_Claude_Prompt.md
+_viz.mjs
+*.tmp.mjs

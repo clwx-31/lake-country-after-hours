@@ -1,0 +1,13 @@
+{
+  "source": "OpenStreetMap",
+  "endpoint": "https://overpass-api.de/api/interpreter",
+  "bbox": {
+    "south": 43.205,
+    "west": -88.375,
+    "north": 43.285,
+    "east": -88.245
+  },
+  "fetchedAt": "2026-11-23T20:00:14Z",
+  "terrain": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/14/{x}/{y}.png (x 4169-4175, y 6002-6007)",
+  "license": "ODbL-1.0"
+}
