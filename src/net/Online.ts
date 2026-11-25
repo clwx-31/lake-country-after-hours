@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import { CarModel } from '../render/CarModel';
 import { textSprite } from '../events/visuals';
 import { ALL_EVENTS, EVENTS, EVENT_ORDER, type EventId } from '../events/defs';
-import { MAP } from '../map/maps';
+import { MAP, isMapId } from '../map/maps';
 import type { Ghost } from '../save/Save';
 import { CARS, PLAYER_CARS, type CarId } from '../sim/cars';
 import type { PhysBody } from '../sim/Physics';
@@ -29,12 +29,12 @@ interface Room {
   connected(): boolean;
 }
 interface DocSnap { id: string; exists: boolean; data(): Record<string, unknown> | undefined; metadata: { fromCache: boolean } }
-interface DocRef { get(): Promise<DocSnap>; set(d: Record<string, unknown>): Promise<void>; onSnapshot(n: (s: DocSnap) => void, e?: (err: { code: string }) => void): () => void }
+interface DocRef { get(): Promise<DocSnap>; set(d: Record<string, unknown>): Promise<void>; delete(): Promise<void>; onSnapshot(n: (s: DocSnap) => void, e?: (err: { code: string }) => void): () => void }
 interface QuerySnap { docs: DocSnap[] }
 interface Collection { onSnapshot(n: (s: QuerySnap) => void, e?: (err: { code: string }) => void): () => void; doc(id: string): DocRef }
 interface DB { doc(path: string): DocRef; collection(path: string): Collection }
 interface Profile { id: string; name: string; color: string; isMe: boolean; guest: boolean }
-interface User { id(): Promise<string | null>; can(c: string): Promise<boolean | null>; profiles(ids: readonly string[]): Promise<Record<string, Profile>> }
+interface User { id(): Promise<string | null>; can(c: string): Promise<boolean | null>; isOwner?(): boolean | Promise<boolean>; profiles(ids: readonly string[]): Promise<Record<string, Profile>> }
 interface ClaudeRuntime { use(name: string): Promise<unknown> }
 
 /** Raceable events on the active map (rivals' races on another map are listed but not joinable). */
@@ -84,6 +84,8 @@ export interface BoardEntry {
 
 export interface OnlineHost {
   scene: THREE.Scene;
+  /** Map bounds: where a friend's car can possibly be. */
+  bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
   beamTex: THREE.Texture;
   player: Vehicle;
   carId: CarId;
@@ -98,6 +100,43 @@ export interface OnlineHost {
 }
 
 const num = (v: unknown, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+const clampN = (v: unknown, lo: number, hi: number, d = 0) => Math.max(lo, Math.min(hi, num(v, d)));
+
+/** Text for innerHTML: other players' names come from outside the game. */
+export const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+/**
+ * A friend's presence, checked and clamped: everything a peer sends is untrusted,
+ * so positions stay on the map and speeds stay possible (their car is solid here).
+ */
+export function readPresence(pr: Readonly<Record<string, unknown>>, bounds: { minX: number; maxX: number; minZ: number; maxZ: number }) {
+  const pad = 300;
+  return {
+    v: pr.v === 1 ? 1 : pr.v === 0 ? 0 : -1,
+    car: PLAYER_CARS.includes(pr.c as CarId) ? (pr.c as CarId) : 'vesper' as CarId,
+    paint: typeof pr.pt === 'string' && /^#[0-9a-f]{6}$/i.test(pr.pt) ? pr.pt : null,
+    map: isMapId(pr.m) ? pr.m : 'lakecountry',
+    x: clampN(pr.x, bounds.minX - pad, bounds.maxX + pad),
+    y: clampN(pr.y, -100, 1000),
+    z: clampN(pr.z, bounds.minZ - pad, bounds.maxZ + pad),
+    h: clampN(pr.h, -1e4, 1e4) % (Math.PI * 2),
+    // The fastest car tops out near 180 m/s; a boost adds a little.
+    s: clampN(pr.s, 0, 200),
+    tier: Math.round(clampN(pr.tr, -1, 3, -1)),
+    ev: typeof pr.ev === 'string' && pr.ev.length <= 24 && Object.hasOwn(ALL_EVENTS, pr.ev) ? pr.ev : '',
+    stars: Math.round(clampN(pr.hs, 0, 5)),
+  };
+}
+
+/**
+ * Is a posted score possible? Times are posted by each player's own page, so the
+ * board hides what no car could do (well past gold) rather than trusting it.
+ */
+export function plausibleScore(ev: EventId, score: number) {
+  const def = Object.hasOwn(ALL_EVENTS, ev) ? ALL_EVENTS[ev] : undefined;
+  if (!def || !Number.isFinite(score) || score <= 0) return false;
+  return def.lowerIsBetter ? score >= def.medals.gold * 0.35 && score < 3600 : score <= def.medals.gold * 6;
+}
 const r1 = (v: number) => Math.round(v * 10) / 10;
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -146,6 +185,11 @@ export class Online {
   readonly remotes = new Map<string, RemoteCar>();
   race: RaceState | null = null;
   private startedSeq = -1;
+  /** The host we joined: only their start counts (anyone could advertise the same code). */
+  private hostPeer: string | null = null;
+  private lastStartAt = -1e9;
+  /** The page's owner may remove leaderboard entries. */
+  isOwner = false;
   private sendTimer = 0;
   private names = new Map<string, { name: string; color: string }>();
   private namesPending = false;
@@ -174,19 +218,23 @@ export class Online {
     if (user) {
       this.myId = await user.id().catch(() => null);
       this.canWrite = await user.can('data.write').catch(() => null);
+      this.isOwner = !!(await Promise.resolve(user.isOwner?.()).catch(() => false));
     }
     room.onPeers((c) => this.onPeers(c), () => { this.state = 'unavailable'; this.clearRemotes(); this.onChange?.(); });
     if (db) {
       db.collection('boards').onSnapshot((snap) => {
         const next: Record<string, BoardEntry> = {};
-        for (const doc of snap.docs) {
+        for (const doc of snap.docs.slice(0, 500)) {
           const d = doc.data();
           const events = (d?.events ?? {}) as Record<string, Record<string, unknown>>;
+          if (typeof events !== 'object' || Object.keys(events).length > 80) continue; // not a game's board
           for (const [ev, e] of Object.entries(events)) {
             // Keep every map's entries (re-posting rewrites the whole doc); show only this map's.
-            if (!(ev in ALL_EVENTS) || typeof e !== 'object' || !e) continue;
+            if (!Object.hasOwn(ALL_EVENTS, ev) || typeof e !== 'object' || !e) continue;
+            const score = num(e.score, NaN);
+            if (!plausibleScore(ev, score)) continue;
             const car = PLAYER_CARS.includes(e.car as CarId) ? (e.car as CarId) : 'vesper';
-            next[`${doc.id}|${ev}`] = { uid: doc.id, score: num(e.score), time: num(e.time, undefined as unknown as number), car, at: String(e.at ?? ''), ghost: !!e.ghost, diff: Math.max(1, Math.min(5, Math.round(num(e.diff, 3)))) };
+            next[`${doc.id}|${ev}`] = { uid: doc.id, score, time: num(e.time, undefined as unknown as number), car, at: String(e.at ?? '').slice(0, 40), ghost: !!e.ghost, diff: Math.max(1, Math.min(5, Math.round(num(e.diff, 3)))) };
           }
         }
         this.boards = next;
@@ -204,6 +252,10 @@ export class Online {
     return this.state === 'on';
   }
 
+  private bounds() {
+    return this.host.bounds;
+  }
+
   // ------------------------------------------------------------------ presence in
   private onPeers(c: PeersChange) {
     for (const p of c.left) this.removeRemote(p.peer);
@@ -216,11 +268,12 @@ export class Online {
   }
 
   private ingest(p: Peer) {
-    const pr = p.presence ?? {};
-    if (pr.v !== 0 && pr.v !== 1) return; // another page version
+    const raw = p.presence ?? {};
+    const pr = readPresence(raw, this.bounds());
+    if (pr.v < 0) return; // another page version
     let r = this.remotes.get(p.peer);
-    const car = PLAYER_CARS.includes(pr.c as CarId) ? (pr.c as CarId) : 'vesper';
-    const paint = typeof pr.pt === 'string' && /^#[0-9a-f]{6}$/i.test(pr.pt) ? pr.pt : CARS[car].paints[0];
+    const car = pr.car;
+    const paint = pr.paint ?? CARS[car].paints[0];
     if (!r || r.car !== car) {
       if (r) this.disposeRemote(r);
       const model = new CarModel(car, paint, { beamTex: this.host.beamTex });
@@ -238,26 +291,26 @@ export class Online {
     }
     r.by = p.by;
     // Friends on another map are listed but never drawn in this world.
-    r.map = typeof pr.m === 'string' ? pr.m : 'lakecountry';
+    r.map = pr.map;
     r.visible = pr.v === 1 && r.map === MAP.id;
     r.model.root.visible = r.visible;
     r.body.solid = r.visible;
     const now = performance.now();
     if (!r.visible) r.snaps.length = 0;
-    const snap = { t: now, x: num(pr.x), y: num(pr.y), z: num(pr.z), h: num(pr.h), s: num(pr.s), tier: num(pr.tr) };
+    const snap = { t: now, x: pr.x, y: pr.y, z: pr.z, h: pr.h, s: pr.s, tier: pr.tier };
     const lastSnap = r.snaps[r.snaps.length - 1];
     if (r.visible && (!lastSnap || lastSnap.x !== snap.x || lastSnap.z !== snap.z || lastSnap.h !== snap.h || now - lastSnap.t > 500)) {
       r.snaps.push(snap);
       if (r.snaps.length > 12) r.snaps.shift();
     }
     r.last = now;
-    r.ev = typeof pr.ev === 'string' ? pr.ev : '';
-    r.stars = Math.max(0, Math.min(5, Math.round(num(pr.hs))));
-    const rc = pr.rc as Record<string, unknown> | undefined;
+    r.ev = pr.ev;
+    r.stars = pr.stars;
+    const rc = raw.rc as Record<string, unknown> | undefined;
     if (rc && typeof rc.code === 'string' && /^[A-Z0-9]{4}$/.test(rc.code) && raceEvents().includes(rc.ev as EventId)) {
       r.race = {
         code: rc.code, ev: rc.ev as EventId, host: !!rc.host, st: rc.st === 'go' || rc.st === 'done' ? rc.st : 'lobby',
-        seq: Math.round(num(rc.seq)), prog: num(rc.prog), fin: typeof rc.fin === 'number' ? rc.fin : null,
+        seq: Math.round(clampN(rc.seq, 0, 1e6)), prog: clampN(rc.prog, 0, 1e6), fin: typeof rc.fin === 'number' && Number.isFinite(rc.fin) ? rc.fin : null,
       };
     } else r.race = null;
   }
@@ -390,6 +443,7 @@ export class Online {
   joinRace(code: string) {
     const hostCar = [...this.remotes.values()].find((r) => r.race?.host && r.race.code === code);
     if (!hostCar?.race) return false;
+    this.hostPeer = hostCar.peer;
     this.race = { code, ev: hostCar.race.ev, host: false, st: 'lobby', seq: 0, prog: 0, fin: null };
     // A race already running is joined from the next start.
     this.startedSeq = hostCar.race.st === 'go' ? hostCar.race.seq : -1;
@@ -400,6 +454,7 @@ export class Online {
 
   leaveRace() {
     this.race = null;
+    this.hostPeer = null;
     this.sendTimer = 0;
     this.onChange?.();
   }
@@ -437,10 +492,13 @@ export class Online {
 
   private checkRaceStart() {
     if (!this.race || this.race.host) return;
-    const hostCar = [...this.remotes.values()].find((r) => r.race?.host && r.race.code === this.race!.code);
-    if (!hostCar?.race) return;
+    const hostCar = this.hostPeer ? this.remotes.get(this.hostPeer) : undefined;
+    if (!hostCar?.race || !hostCar.race.host || hostCar.race.code !== this.race.code) return;
     if (hostCar.race.ev !== this.race.ev) this.race.ev = hostCar.race.ev;
-    if (hostCar.race.st === 'go' && hostCar.race.seq !== this.startedSeq) {
+    // At most one start every few seconds, so a host cannot spam restarts.
+    const now = performance.now();
+    if (hostCar.race.st === 'go' && hostCar.race.seq !== this.startedSeq && now - this.lastStartAt > 4000) {
+      this.lastStartAt = now;
       this.startedSeq = hostCar.race.seq;
       this.race.st = 'go';
       this.race.fin = null;
@@ -518,14 +576,27 @@ export class Online {
       .map((b) => ({ ...b, name: b.uid === this.myId ? 'You' : this.nameOf(b.uid) }));
   }
 
+  /** Owner only: take a player's board (and ghosts) off the leaderboard. */
+  async removeBoard(uid: string) {
+    if (!this.db || !this.isOwner) return false;
+    try {
+      for (const ev of Object.keys(ALL_EVENTS)) await this.db.doc(`boards/${uid}/ghosts/${ev}`).delete().catch(() => {});
+      await this.db.doc(`boards/${uid}`).delete();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async loadGhost(uid: string, ev: EventId): Promise<Ghost | null> {
     if (!this.db) return null;
     try {
       const snap = await this.db.doc(`boards/${uid}/ghosts/${ev}`).get();
       const d = snap.data();
-      if (!snap.exists || !d || typeof d.data !== 'string') return null;
+      // A ghost is a few hundred KB at most; anything bigger is not one of ours.
+      if (!snap.exists || !d || typeof d.data !== 'string' || d.data.length > 800000) return null;
       const car = PLAYER_CARS.includes(d.car as CarId) ? (d.car as CarId) : 'vesper';
-      return { course: String(d.course), version: String(d.version), car, time: num(d.time), dt: num(d.dt, 0.05), samples: unpackGhost({ ox: num(d.ox), oz: num(d.oz), data: d.data }) };
+      return { course: String(d.course).slice(0, 80), version: String(d.version).slice(0, 40), car, time: clampN(d.time, 0, 3600), dt: clampN(d.dt, 0.01, 0.5, 0.05), samples: unpackGhost({ ox: num(d.ox), oz: num(d.oz), data: d.data }) };
     } catch {
       return null;
     }

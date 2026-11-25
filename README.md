@@ -327,19 +327,43 @@ the same time shares one live room (O opens the panel):
 
 - **See each other drive.** Each car's position is shared about 15 times a
   second and drawn smoothly for everyone, with a name tag. Friends' cars are
-  solid: you can bump them.
-- **Race.** Host the Beaver View Loop, Winkleman Air, or Last Set to get a
-  4-letter code. Friends press Join, and the host presses Start. Everyone gets a
-  grid slot and a countdown, standings update live, and the host can run it
-  again.
+  solid, so you can bump them. Friends on another level are listed but not drawn.
+- **Race.** Host any race event on your level (circuits, sprints, air or
+  delivery events) to get a 4-letter code. Friends press Join, and the host
+  presses Start. Everyone gets a grid slot and a countdown, standings update
+  live, and the host can run it again.
 - **Leaderboard.** Your best for each event is saved to the artifact's shared
-  database, and Beaver View Loop bests include a ghost anyone can race from the
-  board. Everyone can read the board, but each player can only write their own
-  entries (the owner can tidy).
+  database, and circuit bests include a ghost anyone can race from the board.
 
-Friends need a Claude account and an invite from the artifact's Share menu.
-Contributor access lets them post leaderboard times; viewers can still drive
-and race. Without the claude.ai runtime the game is single player.
+To play with friends, open the artifact's **Share** menu and invite them, or
+turn on link sharing. They need a Claude account. Contributor access lets them
+post leaderboard times; Viewers can still drive and race. Without the claude.ai
+runtime the game is single player.
+
+### Security
+
+Everything another player's page sends is treated as untrusted:
+
+- **Database rules** (set when the artifact is published): the leaderboard is
+  readable by everyone with access. Each player can write only their own entry
+  (`boards/<their id>` and its ghosts), and only the owner can change anyone
+  else's.
+- **Live data is checked and clamped** (`readPresence` in `src/net/Online.ts`).
+  Cars, paints, maps and events must be known ids, looked up as own properties
+  so names like `__proto__` and `constructor` are rejected. Positions are kept
+  on the map and speeds to what a car can do, so a tampered page can't fling
+  your car.
+- **Names never become HTML.** Profile names are set as text, or escaped where
+  they go into a message.
+- **Races follow the host you joined.** Another player can't take over a race
+  by advertising the same code, and restarts are limited to one every few
+  seconds.
+- **The board hides impossible scores.** Scores are posted by each player's own
+  page, so any time faster than 35% of gold, or score above six times gold, is
+  dropped on read. Oversized entries and ghosts are ignored. The owner gets a
+  **Remove** button on the board to delete a player's entries.
+- No secrets ship with the game. It stores only opaque player ids (names are
+  looked up when shown) and never collects emails.
 
 ## Map data and licenses
 

@@ -122,7 +122,7 @@ export const MAPS: Record<MapId, MapDef> = {
 export let MAP: MapDef = MAPS.lakecountry;
 
 export function isMapId(id: unknown): id is MapId {
-  return typeof id === 'string' && id in MAPS;
+  return typeof id === 'string' && Object.hasOwn(MAPS, id);
 }
 
 /** Make a map active: its events and venues become the ones every module sees. */

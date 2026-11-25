@@ -37,7 +37,7 @@ import { Pursuit } from '../sim/Pursuit';
 import { Traffic, type Actor } from '../sim/Traffic';
 import { DRIFT_TIERS, Vehicle, defaultMods, measureCar, type DriveInput } from '../sim/Vehicle';
 import { Hud, el, type MiniMarker } from '../ui/Hud';
-import { Online } from '../net/Online';
+import { Online, escapeHtml } from '../net/Online';
 import { Effects } from '../render/Effects';
 import { LC } from '../map/Landcover';
 import { ROAD_RANK } from '../map/District';
@@ -116,7 +116,7 @@ export class Game implements EventHost {
   readonly audio = new Audio();
   /** Garage figures, measured on first look (22 cars are slow to time all at boot). */
   readonly figures: Record<string, CarFigures> = new Proxy({} as Record<string, CarFigures>, {
-    get: (t, k) => (typeof k === 'string' && k in CARS ? (t[k] ??= measureCar(CARS[k as CarId])) : undefined),
+    get: (t, k) => (typeof k === 'string' && Object.hasOwn(CARS, k) ? (t[k] ??= measureCar(CARS[k as CarId])) : undefined),
   });
   readonly online: Online;
   difficulty: DifficultyLevel = difficulty(3);
@@ -261,6 +261,7 @@ export class Game implements EventHost {
     this.online = new Online({
       scene: this.stage.scene,
       beamTex: this.beamTex,
+      bounds: this.d.bounds,
       get player() { return game.player; },
       get carId() { return game.carId; },
       paint: () => this.paintFor(this.carId),
@@ -999,7 +1000,7 @@ export class Game implements EventHost {
     if (!g || g.version !== course.version) { this.toast('Ghost unavailable', 'It was set on an older version of the course', 2); return; }
     this.startEvent(ev, 'ghost');
     this.showGhost(g);
-    this.toast('Ghost race', `${this.online.nameOf(uid)} · ${fmtTime(g.time)}`, 2);
+    this.toast('Ghost race', `${escapeHtml(this.online.nameOf(uid))} · ${fmtTime(g.time)}`, 2);
   }
 
   startEvent(id: EventId, mode: 'rival' | 'ghost' | 'online' = 'rival', slot = 0) {

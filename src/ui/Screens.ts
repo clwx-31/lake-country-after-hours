@@ -46,6 +46,8 @@ export interface ScreenHandlers {
   leaveRace(): void;
   startRace(): void;
   raceGhost(uid: string): void;
+  /** Redraw the online panel (after an owner removes an entry). */
+  refreshOnline?(): void;
   /** Ability carried by a car, and equipping another one. */
   abilityFor(id: CarId): AbilityId;
   setAbility(car: CarId, id: AbilityId): void;
@@ -412,6 +414,13 @@ export class Screens {
             const b = this.button('Race ghost', () => this.h.raceGhost(r.uid), 'btn small');
             b.style.marginLeft = '10px';
             val.append(b);
+          }
+          // The owner can take a bogus entry off the board.
+          if (o.isOwner && r.uid !== o.myId) {
+            const x = this.button('Remove', () => { void o.removeBoard(r.uid).then(() => this.h.refreshOnline?.()); }, 'btn small');
+            x.style.marginLeft = '10px';
+            x.title = "Owner: remove this player's times and ghosts from the shared board";
+            val.append(x);
           }
           grid.append(name, val);
         });
